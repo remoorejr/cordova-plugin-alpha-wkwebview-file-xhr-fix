@@ -1,0 +1,30 @@
+{
+  "name": "cordova-plugin-alpha-wkwebview-file-xhr-fix",
+  "version": "2.3.0",
+  "description": "Cordova Alpha WKWebView File XHR Fix Plugin",
+  "cordova": {
+    "id": "cordova-plugin-alpha-wkwebview-file-xhr-fix",
+    "platforms": [
+      "ios"
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/remoorejr/cordova-plugin-alpha-wkwebview-file-xhr-fix"
+  },
+  "keywords": [
+    "cordova",
+    "wkwebview",
+    "ecosystem:cordova",
+    "cordova-ios"
+  ],
+  "scripts": {
+    "test": "npm run jshint",
+    "jshint": "node node_modules/jshint/bin/jshint www && node node_modules/jshint/bin/jshint src && node node_modules/jshint/bin/jshint tests"
+  },
+  "author": "oraclejet",
+  "license": "UPL-1.0",
+  "devDependencies": {
+    "jshint": "^2.6.0"
+  }
+}
