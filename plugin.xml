@@ -21,12 +21,13 @@
  Modified 03-13-2019 to work with cordova-plugin-alpha-wkwebview-engine
  Modified 10-01-2019 to sync cookies set in the xhr header with the WKWebView 
  Modified 11-16-2022 to remove the cordova-plugin-alpha-wkwebview dependency.
+ Modified 10-31-2023 to remove apple-ios engine dependency that was being ignored on plugin installation
  *
  -->
 
 <plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
     id="cordova-plugin-alpha-wkwebview-file-xhr-fix"
-    version="2.3.0">
+    version="2.3.1">
     <name>Cordova Alpha WKWebView File XHR Plugin</name>
     <description>This plugin is designed to work with Cordova iOS 6.2.0 and Alpha Anywhere. It resolves XHR Cross-Origin Resource Sharing (CORS) constraints.</description>
     <license>UPL 1.0</license> 
@@ -34,7 +35,6 @@
     <repo>https://github.com/remoorejr/cordova-plugin-alpha-wkwebview-file-xhr-fix.git</repo>
     <engines>
       <engine name="cordova-ios" version=">=6.0.0" />
-      <engine name="apple-ios" version=">=9.0" />
     </engines>
 
     <!-- ios -->

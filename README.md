@@ -1,8 +1,8 @@
-# cordova-plugin-alpha-wkwebview-file-xhr-fix 2.3.0
+# cordova-plugin-alpha-wkwebview-file-xhr-fix 2.3.1
 
 ## About the cordova-plugin-alpha-wkwebview-file-xhr-fix
 
-This plugin is based on the cordova-plugin-wkwebview-file-xhr plugin and has been modified to work with Cordova iOS 6.2.0 and Alpha Anywhere.
+This plugin is based on the cordova-plugin-wkwebview-file-xhr plugin and has been modified to work with Cordova iOS 6.2.0+ and Alpha Anywhere.
 
 This plugin makes it possible to reap the performance benefits of using the WKWebView in your Cordova app by resolving the following issues:
 
