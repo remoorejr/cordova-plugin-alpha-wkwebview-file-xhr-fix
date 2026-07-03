@@ -61,7 +61,7 @@ API_AVAILABLE(ios(11.0))
 
 /**
  * Whether verbose [AlphaSession]/[AlphaXHR] diagnostics are enabled (sourced from the
- * AlphaSessionDiagnostics config.xml preference when the WKWebView configuration is built).  Exposed
+ * AlphaDiagnostics config.xml preference when the WKWebView configuration is built).  Exposed
  * so the file-xhr interception can log through the same single toggle.
  */
 @property (atomic, assign, readonly) BOOL diagnosticLoggingEnabled;

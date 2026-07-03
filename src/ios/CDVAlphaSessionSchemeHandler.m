@@ -40,7 +40,7 @@ static NSString * const kAlphaSessionRequiredPathToken = @"/A5SessionFile/";
 
 // config.xml <preference> that toggles verbose per-request diagnostics at runtime.  Cordova lowercases
 // preference keys in the settings dictionary, so the lookup below is done against the lowercase form.
-static NSString * const kAlphaSessionDiagnosticsPreference = @"AlphaSessionDiagnostics";
+static NSString * const kAlphaDiagnosticsPreference = @"AlphaDiagnostics";
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -60,7 +60,7 @@ API_AVAILABLE(ios(11.0))
 // queue and the main queue.
 @property (nonatomic, strong) NSLock *lock;
 
-// Verbose per-request diagnostics toggle, sourced from the config.xml AlphaSessionDiagnostics
+// Verbose per-request diagnostics toggle, sourced from the config.xml AlphaDiagnostics
 // preference when the WKWebView configuration is built.  Logs cookie names/counts only, never values.
 @property (atomic, assign) BOOL diagnosticLoggingEnabled;
 
@@ -184,7 +184,7 @@ API_AVAILABLE(ios(11.0))
 }
 
 /**
- * Reads the AlphaSessionDiagnostics config.xml preference from the Cordova settings dictionary.
+ * Reads the AlphaDiagnostics config.xml preference from the Cordova settings dictionary.
  * Cordova stores preference keys lowercased, so the lookup is case-insensitive.  Accepts the usual
  * truthy strings ("true", "yes", "1").  Defaults to NO when the preference is absent.
  */
@@ -193,9 +193,9 @@ API_AVAILABLE(ios(11.0))
         return NO;
     }
 
-    id value = settings[kAlphaSessionDiagnosticsPreference];
+    id value = settings[kAlphaDiagnosticsPreference];
     if (value == nil) {
-        value = settings[[kAlphaSessionDiagnosticsPreference lowercaseString]];
+        value = settings[[kAlphaDiagnosticsPreference lowercaseString]];
     }
     if (![value isKindOfClass:[NSString class]]) {
         return NO;
