@@ -269,7 +269,16 @@ API_AVAILABLE(ios(11.0))
         }
     }
 
-    NSArray<NSHTTPCookie *> *applicableCookies = [self cookiesFrom:webViewCookies applicableToURL:targetURL];
+    // The session cookie is written to NSHTTPCookieStorage.sharedHTTPCookieStorage by the file-xhr
+    // plugin's NSURLSession as soon as the login/session XHR completes, but it is only synced into the
+    // WebView's WKHTTPCookieStore on a LATER XHR completion.  Merge both stores so the very first
+    // session-file request can see the session cookie even before that sync happens.
+    NSArray<NSHTTPCookie *> *mergedCookies = [self mergeCookies:webViewCookies
+                                                  primaryLabel:@"WKHTTPCookieStore"
+                                                          with:[NSHTTPCookieStorage sharedHTTPCookieStorage].cookies
+                                                secondaryLabel:@"sharedHTTPCookieStorage"];
+
+    NSArray<NSHTTPCookie *> *applicableCookies = [self cookiesFrom:mergedCookies applicableToURL:targetURL];
     if (applicableCookies.count > 0) {
         NSDictionary<NSString *, NSString *> *cookieHeaders = [NSHTTPCookie requestHeaderFieldsWithCookies:applicableCookies];
         NSString *cookieHeader = cookieHeaders[@"Cookie"];
@@ -283,10 +292,12 @@ API_AVAILABLE(ios(11.0))
         for (NSHTTPCookie *cookie in applicableCookies) {
             [names addObject:cookie.name];
         }
-        NSLog(@"[AlphaSession] Attaching %lu cookie(s) [%@] to %@",
+        NSLog(@"[AlphaSession] Attaching %lu cookie(s) [%@] to %@ (webViewStore: %lu, sharedStore: %lu)",
               (unsigned long)applicableCookies.count,
               [names componentsJoinedByString:@", "],
-              targetURL.absoluteString);
+              targetURL.absoluteString,
+              (unsigned long)webViewCookies.count,
+              (unsigned long)[NSHTTPCookieStorage sharedHTTPCookieStorage].cookies.count);
     }
 
     NSURLSessionDataTask *dataTask = [self.urlSession dataTaskWithRequest:proxyRequest];
@@ -301,6 +312,44 @@ API_AVAILABLE(ios(11.0))
     [self.lock unlock];
 
     [dataTask resume];
+}
+
+/**
+ * Merges two cookie collections, de-duplicating by name/domain/path.  Cookies from `primary` win over
+ * `secondary` when the same cookie exists in both.  When diagnostics are enabled, logs the source that
+ * supplied each cookie and any duplicates that were suppressed.
+ */
+- (NSArray<NSHTTPCookie *> *)mergeCookies:(nullable NSArray<NSHTTPCookie *> *)primary
+                             primaryLabel:(NSString *)primaryLabel
+                                     with:(nullable NSArray<NSHTTPCookie *> *)secondary
+                           secondaryLabel:(NSString *)secondaryLabel {
+    NSMutableArray<NSHTTPCookie *> *merged = [NSMutableArray array];
+    NSMutableDictionary<NSString *, NSString *> *sourceForKey = [NSMutableDictionary dictionary];
+
+    NSArray<NSArray *> *sources = @[ @[ primary ?: @[], primaryLabel ], @[ secondary ?: @[], secondaryLabel ] ];
+    for (NSArray *entry in sources) {
+        NSArray<NSHTTPCookie *> *source = entry[0];
+        NSString *label = entry[1];
+        for (NSHTTPCookie *cookie in source) {
+            NSString *key = [NSString stringWithFormat:@"%@\n%@\n%@",
+                             cookie.name ?: @"", cookie.domain.lowercaseString ?: @"", cookie.path ?: @""];
+            NSString *existingSource = sourceForKey[key];
+            if (existingSource != nil) {
+                if (self.diagnosticLoggingEnabled) {
+                    NSLog(@"[AlphaSession] Cookie '%@' (domain %@) also in %@; kept copy from %@ (priority).",
+                          cookie.name, cookie.domain, label, existingSource);
+                }
+                continue;
+            }
+            sourceForKey[key] = label;
+            [merged addObject:cookie];
+            if (self.diagnosticLoggingEnabled) {
+                NSLog(@"[AlphaSession] Cookie '%@' (domain %@) sourced from %@.",
+                      cookie.name, cookie.domain, label);
+            }
+        }
+    }
+    return merged;
 }
 
 /**
