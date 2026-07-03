@@ -59,6 +59,28 @@ API_AVAILABLE(ios(11.0))
 
 + (instancetype)sharedHandler;
 
+/**
+ * Inspects a raw XHR response's headers and captures the Alpha session cookie so subsequent
+ * alpha-session requests can attach it.  This is required for cross-site / Partitioned (CHIPS) session
+ * cookies (e.g. Alpha's A5WSessionId), which the XHR NSURLSession does not reliably commit to
+ * NSHTTPCookieStorage on the first response.
+ *
+ * Two complementary signals are used:
+ *   - Set-Cookie: parsed generically (the session cookie name is configurable in Alpha, so it is never
+ *     hard-coded); the cookie name is learned by matching its value against the X-A5WSessionId header.
+ *   - X-A5WSessionId: Alpha sends this on every response with the current session value, so once the
+ *     cookie name has been learned it is used to keep the remembered session cookie value current even
+ *     on responses that do not include a fresh Set-Cookie.
+ */
+- (void)rememberCookiesFromResponseHeaders:(NSDictionary *)headerFields forURL:(NSURL *)url;
+
+/**
+ * Registers cookies observed on a raw XHR response so that subsequent alpha-session requests can
+ * attach them.  Cookies are de-duplicated by name/domain/path, with the most recently registered
+ * value winning.
+ */
+- (void)rememberCookies:(NSArray<NSHTTPCookie *> *)cookies;
+
 @end
 
 NS_ASSUME_NONNULL_END

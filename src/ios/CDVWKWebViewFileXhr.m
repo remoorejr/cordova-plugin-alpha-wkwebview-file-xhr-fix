@@ -39,6 +39,7 @@
  */
 
 #import "CDVWKWebViewFileXhr.h"
+#import "CDVAlphaSessionSchemeHandler.h"
 #import <Cordova/CDV.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -419,6 +420,19 @@ NS_ASSUME_NONNULL_BEGIN
 
                 dictionary[@"statusCode"] = @(urlResponse.statusCode);
                 dictionary[@"localizedStatusCode"] = [NSHTTPURLResponse localizedStringForStatusCode:urlResponse.statusCode];   
+
+                // Capture the Alpha session cookie straight from the raw response headers and hand it
+                // to the alpha-session scheme handler.  Cross-site / Partitioned (CHIPS) session cookies
+                // such as Alpha's A5WSessionId are not reliably committed to NSHTTPCookieStorage on the
+                // first response, so parsing the Set-Cookie header (and the always-present X-A5WSessionId
+                // header) here makes the session available to native session-file loads on the very
+                // first attempt.
+                if (@available(iOS 11.0, *)) {
+                    if (urlResponse.URL != nil) {
+                        [[CDVAlphaSessionSchemeHandler sharedHandler] rememberCookiesFromResponseHeaders:originalHeaders
+                                                                                                  forURL:urlResponse.URL];
+                    }
+                }
 
                 // sync cookies with WKWebView
                 for (NSHTTPCookie *cookie in [[NSHTTPCookieStorage sharedHTTPCookieStorage] cookies]) {

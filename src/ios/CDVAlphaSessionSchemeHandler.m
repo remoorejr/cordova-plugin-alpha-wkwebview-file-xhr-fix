@@ -64,6 +64,19 @@ API_AVAILABLE(ios(11.0))
 // preference when the WKWebView configuration is built.  Logs cookie names/counts only, never values.
 @property (atomic, assign) BOOL diagnosticLoggingEnabled;
 
+// Cookies captured from raw XHR responses (see -rememberCookies:), keyed by name/domain/path.  Used
+// as the highest-priority cookie source so cross-site / Partitioned session cookies are available on
+// the very first alpha-session request.  Guarded by `rememberedCookiesLock`.
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSHTTPCookie *> *rememberedCookies;
+@property (nonatomic, strong) NSLock *rememberedCookiesLock;
+
+// The learned Alpha session cookie identity, discovered by matching a Set-Cookie value against the
+// X-A5WSessionId response header.  Once known, the X-A5WSessionId header alone keeps the remembered
+// session cookie value current.  All guarded by `rememberedCookiesLock`.
+@property (nonatomic, copy, nullable) NSString *sessionCookieName;
+@property (nonatomic, copy, nullable) NSString *sessionCookieDomain;
+@property (nonatomic, copy, nullable) NSString *sessionCookiePath;
+
 @end
 
 @implementation CDVAlphaSessionSchemeHandler
@@ -92,6 +105,8 @@ API_AVAILABLE(ios(11.0))
         _taskMap = [NSMapTable strongToStrongObjectsMapTable];
         _activeSchemeTasks = [NSMutableSet set];
         _lock = [[NSLock alloc] init];
+        _rememberedCookies = [NSMutableDictionary dictionary];
+        _rememberedCookiesLock = [[NSLock alloc] init];
     }
     return self;
 }
@@ -271,12 +286,17 @@ API_AVAILABLE(ios(11.0))
 
     // The session cookie is written to NSHTTPCookieStorage.sharedHTTPCookieStorage by the file-xhr
     // plugin's NSURLSession as soon as the login/session XHR completes, but it is only synced into the
-    // WebView's WKHTTPCookieStore on a LATER XHR completion.  Merge both stores so the very first
-    // session-file request can see the session cookie even before that sync happens.
-    NSArray<NSHTTPCookie *> *mergedCookies = [self mergeCookies:webViewCookies
-                                                  primaryLabel:@"WKHTTPCookieStore"
-                                                          with:[NSHTTPCookieStorage sharedHTTPCookieStorage].cookies
-                                                secondaryLabel:@"sharedHTTPCookieStorage"];
+    // WebView's WKHTTPCookieStore on a LATER XHR completion.  Cross-site / Partitioned (CHIPS) cookies
+    // such as Alpha's A5WSessionId may not be committed to either store on the first response at all,
+    // so cookies captured directly from the raw XHR response (-rememberCookies:) take top priority.
+    NSArray<NSHTTPCookie *> *rememberedCookies = [self rememberedCookiesSnapshot];
+    NSArray<NSHTTPCookie *> *webViewStoreCookies = webViewCookies ?: @[];
+    NSArray<NSHTTPCookie *> *sharedStoreCookies = [NSHTTPCookieStorage sharedHTTPCookieStorage].cookies ?: @[];
+    NSArray<NSHTTPCookie *> *mergedCookies = [self mergeCookieSources:@[
+        @[ rememberedCookies, @"xhrResponse" ],
+        @[ webViewStoreCookies, @"WKHTTPCookieStore" ],
+        @[ sharedStoreCookies, @"sharedHTTPCookieStorage" ],
+    ]];
 
     NSArray<NSHTTPCookie *> *applicableCookies = [self cookiesFrom:mergedCookies applicableToURL:targetURL];
     if (applicableCookies.count > 0) {
@@ -292,10 +312,11 @@ API_AVAILABLE(ios(11.0))
         for (NSHTTPCookie *cookie in applicableCookies) {
             [names addObject:cookie.name];
         }
-        NSLog(@"[AlphaSession] Attaching %lu cookie(s) [%@] to %@ (webViewStore: %lu, sharedStore: %lu)",
+        NSLog(@"[AlphaSession] Attaching %lu cookie(s) [%@] to %@ (remembered: %lu, webViewStore: %lu, sharedStore: %lu)",
               (unsigned long)applicableCookies.count,
               [names componentsJoinedByString:@", "],
               targetURL.absoluteString,
+              (unsigned long)rememberedCookies.count,
               (unsigned long)webViewCookies.count,
               (unsigned long)[NSHTTPCookieStorage sharedHTTPCookieStorage].cookies.count);
     }
@@ -315,18 +336,144 @@ API_AVAILABLE(ios(11.0))
 }
 
 /**
- * Merges two cookie collections, de-duplicating by name/domain/path.  Cookies from `primary` win over
- * `secondary` when the same cookie exists in both.  When diagnostics are enabled, logs the source that
- * supplied each cookie and any duplicates that were suppressed.
+ * Inspects a raw XHR response's headers and captures the Alpha session cookie.  See the header
+ * documentation for the Set-Cookie + X-A5WSessionId strategy.
  */
-- (NSArray<NSHTTPCookie *> *)mergeCookies:(nullable NSArray<NSHTTPCookie *> *)primary
-                             primaryLabel:(NSString *)primaryLabel
-                                     with:(nullable NSArray<NSHTTPCookie *> *)secondary
-                           secondaryLabel:(NSString *)secondaryLabel {
+- (void)rememberCookiesFromResponseHeaders:(NSDictionary *)headerFields forURL:(NSURL *)url {
+    if (![headerFields isKindOfClass:[NSDictionary class]] || url == nil) {
+        return;
+    }
+
+    // Alpha sends the current session value on every response via X-A5WSessionId.
+    NSString *sessionValue = [self headerValueForName:@"X-A5WSessionId" inHeaders:headerFields];
+
+    // Parse any Set-Cookie header(s) generically (the session cookie name is configurable in Alpha,
+    // so it is never hard-coded) and remember them.
+    NSArray<NSHTTPCookie *> *responseCookies = [NSHTTPCookie cookiesWithResponseHeaderFields:headerFields forURL:url];
+    BOOL sessionCookieInSetCookie = NO;
+    if (responseCookies.count > 0) {
+        [self rememberCookies:responseCookies];
+
+        // Learn which cookie is the session cookie by matching its value to X-A5WSessionId.
+        if (sessionValue.length > 0) {
+            for (NSHTTPCookie *cookie in responseCookies) {
+                if ([cookie.value isEqualToString:sessionValue]) {
+                    [self.rememberedCookiesLock lock];
+                    self.sessionCookieName = cookie.name;
+                    self.sessionCookieDomain = cookie.domain;
+                    self.sessionCookiePath = cookie.path.length > 0 ? cookie.path : @"/";
+                    [self.rememberedCookiesLock unlock];
+                    sessionCookieInSetCookie = YES;
+                    if (self.diagnosticLoggingEnabled) {
+                        NSLog(@"[AlphaSession] Learned session cookie name '%@' (domain %@) from Set-Cookie matching X-A5WSessionId.",
+                              cookie.name, cookie.domain);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // If this response did not carry the session cookie in Set-Cookie but we already know the cookie
+    // name, synthesise/refresh it from the always-present X-A5WSessionId value so the current session
+    // id stays available to native session-file loads.
+    if (sessionValue.length > 0 && !sessionCookieInSetCookie) {
+        [self.rememberedCookiesLock lock];
+        NSString *name = self.sessionCookieName;
+        NSString *learnedDomain = self.sessionCookieDomain;
+        NSString *learnedPath = self.sessionCookiePath;
+        [self.rememberedCookiesLock unlock];
+
+        if (name.length > 0) {
+            NSString *domain = learnedDomain.length > 0 ? learnedDomain : url.host;
+            NSString *path = learnedPath.length > 0 ? learnedPath : @"/";
+            if (domain.length > 0) {
+                NSDictionary *properties = @{
+                    NSHTTPCookieName: name,
+                    NSHTTPCookieValue: sessionValue,
+                    NSHTTPCookieDomain: domain,
+                    NSHTTPCookiePath: path,
+                };
+                NSHTTPCookie *sessionCookie = [NSHTTPCookie cookieWithProperties:properties];
+                if (sessionCookie != nil) {
+                    [self rememberCookies:@[ sessionCookie ]];
+                    if (self.diagnosticLoggingEnabled) {
+                        NSLog(@"[AlphaSession] Refreshed session cookie '%@' (domain %@) from X-A5WSessionId header.",
+                              name, domain);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Case-insensitive lookup of a single header value (response header dictionaries preserve the server's
+ * original key casing).
+ */
+- (nullable NSString *)headerValueForName:(NSString *)name inHeaders:(NSDictionary *)headers {
+    id direct = headers[name];
+    if ([direct isKindOfClass:[NSString class]]) {
+        return direct;
+    }
+    for (id key in headers) {
+        if ([key isKindOfClass:[NSString class]] && [(NSString *)key caseInsensitiveCompare:name] == NSOrderedSame) {
+            id value = headers[key];
+            return [value isKindOfClass:[NSString class]] ? value : nil;
+        }
+    }
+    return nil;
+}
+
+/**
+ * Registers cookies observed on a raw XHR response so subsequent alpha-session requests can attach
+ * them.  See the header documentation for why this is required for Partitioned session cookies.
+ */
+- (void)rememberCookies:(NSArray<NSHTTPCookie *> *)cookies {
+    if (cookies.count == 0) {
+        return;
+    }
+    [self.rememberedCookiesLock lock];
+    for (NSHTTPCookie *cookie in cookies) {
+        if (![cookie isKindOfClass:[NSHTTPCookie class]]) {
+            continue;
+        }
+        NSString *key = [NSString stringWithFormat:@"%@\n%@\n%@",
+                         cookie.name ?: @"", cookie.domain.lowercaseString ?: @"", cookie.path ?: @""];
+        self.rememberedCookies[key] = cookie;
+    }
+    [self.rememberedCookiesLock unlock];
+
+    if (self.diagnosticLoggingEnabled) {
+        NSMutableArray<NSString *> *names = [NSMutableArray arrayWithCapacity:cookies.count];
+        for (NSHTTPCookie *cookie in cookies) {
+            [names addObject:cookie.name ?: @""];
+        }
+        NSLog(@"[AlphaSession] Remembered %lu cookie(s) [%@] from XHR response.",
+              (unsigned long)cookies.count, [names componentsJoinedByString:@", "]);
+    }
+}
+
+/**
+ * Returns a snapshot of the currently remembered cookies.
+ */
+- (NSArray<NSHTTPCookie *> *)rememberedCookiesSnapshot {
+    [self.rememberedCookiesLock lock];
+    NSArray<NSHTTPCookie *> *snapshot = [self.rememberedCookies.allValues copy];
+    [self.rememberedCookiesLock unlock];
+    return snapshot;
+}
+
+/**
+ * Merges cookie collections from multiple labelled sources, de-duplicating by name/domain/path.
+ * Earlier sources win over later ones when the same cookie appears in more than one.  Each entry is a
+ * two-element array of the form @[ <NSArray of NSHTTPCookie>, <NSString label> ].  When diagnostics
+ * are enabled, logs the source that supplied each cookie and any duplicates that were suppressed.
+ */
+- (NSArray<NSHTTPCookie *> *)mergeCookieSources:(NSArray<NSArray *> *)sources {
     NSMutableArray<NSHTTPCookie *> *merged = [NSMutableArray array];
     NSMutableDictionary<NSString *, NSString *> *sourceForKey = [NSMutableDictionary dictionary];
 
-    NSArray<NSArray *> *sources = @[ @[ primary ?: @[], primaryLabel ], @[ secondary ?: @[], secondaryLabel ] ];
     for (NSArray *entry in sources) {
         NSArray<NSHTTPCookie *> *source = entry[0];
         NSString *label = entry[1];
