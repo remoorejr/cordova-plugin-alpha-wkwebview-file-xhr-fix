@@ -38,6 +38,10 @@ static NSString * const kAlphaSessionScheme = @"alpha-session";
 static NSString * const kAlphaSessionSchemePrefix = @"alpha-session://";
 static NSString * const kAlphaSessionRequiredPathToken = @"/A5SessionFile/";
 
+// config.xml <preference> that toggles verbose per-request diagnostics at runtime.  Cordova lowercases
+// preference keys in the settings dictionary, so the lookup below is done against the lowercase form.
+static NSString * const kAlphaSessionDiagnosticsPreference = @"AlphaSessionDiagnostics";
+
 NS_ASSUME_NONNULL_BEGIN
 
 API_AVAILABLE(ios(11.0))
@@ -55,6 +59,10 @@ API_AVAILABLE(ios(11.0))
 // Guards taskMap and activeSchemeTasks, both of which are touched from the session delegate
 // queue and the main queue.
 @property (nonatomic, strong) NSLock *lock;
+
+// Verbose per-request diagnostics toggle, sourced from the config.xml AlphaSessionDiagnostics
+// preference when the WKWebView configuration is built.  Logs cookie names/counts only, never values.
+@property (atomic, assign) BOOL diagnosticLoggingEnabled;
 
 @end
 
@@ -146,15 +154,42 @@ API_AVAILABLE(ios(11.0))
 
     if (configuration != nil) {
         if (@available(iOS 11.0, *)) {
+            CDVAlphaSessionSchemeHandler *handler = [CDVAlphaSessionSchemeHandler sharedHandler];
+            handler.diagnosticLoggingEnabled = [CDVAlphaSessionSchemeHandler diagnosticsEnabledFromSettings:settings];
             if ([configuration urlSchemeHandlerForURLScheme:kAlphaSessionScheme] == nil) {
-                [configuration setURLSchemeHandler:[CDVAlphaSessionSchemeHandler sharedHandler]
+                [configuration setURLSchemeHandler:handler
                                       forURLScheme:kAlphaSessionScheme];
-                NSLog(@"[AlphaSession] Attached alpha-session scheme handler to WKWebViewConfiguration.");
+                NSLog(@"[AlphaSession] Attached alpha-session scheme handler to WKWebViewConfiguration (diagnostics: %@).",
+                      handler.diagnosticLoggingEnabled ? @"on" : @"off");
             }
         }
     }
 
     return configuration;
+}
+
+/**
+ * Reads the AlphaSessionDiagnostics config.xml preference from the Cordova settings dictionary.
+ * Cordova stores preference keys lowercased, so the lookup is case-insensitive.  Accepts the usual
+ * truthy strings ("true", "yes", "1").  Defaults to NO when the preference is absent.
+ */
++ (BOOL)diagnosticsEnabledFromSettings:(nullable NSDictionary *)settings {
+    if (![settings isKindOfClass:[NSDictionary class]]) {
+        return NO;
+    }
+
+    id value = settings[kAlphaSessionDiagnosticsPreference];
+    if (value == nil) {
+        value = settings[[kAlphaSessionDiagnosticsPreference lowercaseString]];
+    }
+    if (![value isKindOfClass:[NSString class]]) {
+        return NO;
+    }
+
+    NSString *normalized = [(NSString *)value lowercaseString];
+    return [normalized isEqualToString:@"true"]
+        || [normalized isEqualToString:@"yes"]
+        || [normalized isEqualToString:@"1"];
 }
 
 #pragma mark - WKURLSchemeHandler
@@ -164,6 +199,9 @@ API_AVAILABLE(ios(11.0))
     NSURL *targetURL = [self reconstructTargetURLFromSchemeURL:originalRequest.URL];
 
     if (targetURL == nil) {
+        if (self.diagnosticLoggingEnabled) {
+            NSLog(@"[AlphaSession] Rejected request; invalid alpha-session URL: %@", originalRequest.URL.absoluteString);
+        }
         NSError *error = [NSError errorWithDomain:NSURLErrorDomain
                                              code:NSURLErrorUnsupportedURL
                                          userInfo:@{ NSLocalizedDescriptionKey: @"Invalid alpha-session URL." }];
@@ -171,9 +209,54 @@ API_AVAILABLE(ios(11.0))
         return;
     }
 
+    if (self.diagnosticLoggingEnabled) {
+        NSLog(@"[AlphaSession] Scheme fired: %@ -> %@ (%@)",
+              originalRequest.URL.absoluteString,
+              targetURL.absoluteString,
+              originalRequest.HTTPMethod.length > 0 ? originalRequest.HTTPMethod : @"GET");
+    }
+
+    // Mark the scheme task active up-front so a stopURLSchemeTask: that arrives before the
+    // asynchronous cookie fetch completes is observed and the request is abandoned safely.
+    [self.lock lock];
+    [self.activeSchemeTasks addObject:urlSchemeTask];
+    [self.lock unlock];
+
+    // WKWebView keeps its session cookie in its own WKHTTPCookieStore, which is NOT the same as
+    // NSHTTPCookieStorage.sharedHTTPCookieStorage that NSURLSession reads from.  On a fresh session
+    // the shared store has not yet been populated, so the first native subresource load would go out
+    // without the session cookie.  Fetch the cookies from the WebView's own store and attach them
+    // manually so the very first request carries the correct session cookie.
+    WKHTTPCookieStore *cookieStore = webView.configuration.websiteDataStore.httpCookieStore;
+    [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+        [self startProxyForSchemeTask:urlSchemeTask
+                            targetURL:targetURL
+                      originalRequest:originalRequest
+                       webViewCookies:cookies];
+    }];
+}
+
+/**
+ * Builds and starts the proxied NSURLSession request for a scheme task, injecting the cookies that
+ * apply to the target URL.  Runs on the main thread from the WKHTTPCookieStore completion handler.
+ */
+- (void)startProxyForSchemeTask:(id<WKURLSchemeTask>)urlSchemeTask
+                     targetURL:(NSURL *)targetURL
+               originalRequest:(NSURLRequest *)originalRequest
+                webViewCookies:(NSArray<NSHTTPCookie *> *)webViewCookies API_AVAILABLE(ios(11.0)) {
+    // The scheme task may have been stopped while the cookies were being fetched.
+    if (![self isSchemeTaskActive:urlSchemeTask]) {
+        if (self.diagnosticLoggingEnabled) {
+            NSLog(@"[AlphaSession] Scheme task stopped before proxy start: %@", targetURL.absoluteString);
+        }
+        return;
+    }
+
     NSMutableURLRequest *proxyRequest = [NSMutableURLRequest requestWithURL:targetURL];
     proxyRequest.HTTPMethod = originalRequest.HTTPMethod.length > 0 ? originalRequest.HTTPMethod : @"GET";
-    [proxyRequest setHTTPShouldHandleCookies:YES];
+    // Cookies are injected manually below from the WebView's own cookie store, so disable the
+    // session's automatic (shared-storage) cookie handling to avoid conflicting/stale cookies.
+    [proxyRequest setHTTPShouldHandleCookies:NO];
 
     // Forward a safe subset of headers from the original request so that conditional and range
     // loads (large images, revalidation) continue to work.
@@ -186,15 +269,86 @@ API_AVAILABLE(ios(11.0))
         }
     }
 
+    NSArray<NSHTTPCookie *> *applicableCookies = [self cookiesFrom:webViewCookies applicableToURL:targetURL];
+    if (applicableCookies.count > 0) {
+        NSDictionary<NSString *, NSString *> *cookieHeaders = [NSHTTPCookie requestHeaderFieldsWithCookies:applicableCookies];
+        NSString *cookieHeader = cookieHeaders[@"Cookie"];
+        if (cookieHeader.length > 0) {
+            [proxyRequest setValue:cookieHeader forHTTPHeaderField:@"Cookie"];
+        }
+    }
+
+    if (self.diagnosticLoggingEnabled) {
+        NSMutableArray<NSString *> *names = [NSMutableArray arrayWithCapacity:applicableCookies.count];
+        for (NSHTTPCookie *cookie in applicableCookies) {
+            [names addObject:cookie.name];
+        }
+        NSLog(@"[AlphaSession] Attaching %lu cookie(s) [%@] to %@",
+              (unsigned long)applicableCookies.count,
+              [names componentsJoinedByString:@", "],
+              targetURL.absoluteString);
+    }
+
     NSURLSessionDataTask *dataTask = [self.urlSession dataTaskWithRequest:proxyRequest];
 
     [self.lock lock];
-    [self.activeSchemeTasks addObject:urlSchemeTask];
+    // Re-check under the lock: a stop that raced with the cookie fetch may have removed the task.
+    if (![self.activeSchemeTasks containsObject:urlSchemeTask]) {
+        [self.lock unlock];
+        return;
+    }
     [self.taskMap setObject:urlSchemeTask forKey:dataTask];
     [self.lock unlock];
 
     [dataTask resume];
 }
+
+/**
+ * Filters the supplied cookies down to those that apply to the given URL, honouring domain, path,
+ * secure-only and expiry rules.  Mirrors the subset of RFC 6265 matching needed for session files.
+ */
+- (NSArray<NSHTTPCookie *> *)cookiesFrom:(NSArray<NSHTTPCookie *> *)cookies
+                        applicableToURL:(NSURL *)url {
+    NSString *host = url.host.lowercaseString;
+    if (host.length == 0) {
+        return @[];
+    }
+    NSString *path = url.path.length > 0 ? url.path : @"/";
+    BOOL isSecureScheme = [url.scheme.lowercaseString isEqualToString:@"https"];
+    NSDate *now = [NSDate date];
+
+    NSMutableArray<NSHTTPCookie *> *result = [NSMutableArray array];
+    for (NSHTTPCookie *cookie in cookies) {
+        NSString *cookieDomain = cookie.domain.lowercaseString;
+        BOOL domainMatches = NO;
+        if ([cookieDomain hasPrefix:@"."]) {
+            NSString *bareDomain = [cookieDomain substringFromIndex:1];
+            domainMatches = [host isEqualToString:bareDomain] || [host hasSuffix:cookieDomain];
+        } else {
+            domainMatches = [host isEqualToString:cookieDomain];
+        }
+        if (!domainMatches) {
+            continue;
+        }
+
+        NSString *cookiePath = cookie.path.length > 0 ? cookie.path : @"/";
+        if (![path hasPrefix:cookiePath]) {
+            continue;
+        }
+
+        if (cookie.isSecure && !isSecureScheme) {
+            continue;
+        }
+
+        if (cookie.expiresDate != nil && [cookie.expiresDate compare:now] == NSOrderedAscending) {
+            continue;
+        }
+
+        [result addObject:cookie];
+    }
+    return result;
+}
+
 
 - (void)webView:(WKWebView *)webView stopURLSchemeTask:(id<WKURLSchemeTask>)urlSchemeTask API_AVAILABLE(ios(11.0)) {
     NSURLSessionTask *taskToCancel = nil;
@@ -227,6 +381,15 @@ didReceiveResponse:(NSURLResponse *)response
     if (schemeTask == nil || ![self isSchemeTaskActive:schemeTask]) {
         completionHandler(NSURLSessionResponseCancel);
         return;
+    }
+
+    if (self.diagnosticLoggingEnabled && [response isKindOfClass:[NSHTTPURLResponse class]]) {
+        NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+        BOOL hasSetCookie = httpResponse.allHeaderFields[@"Set-Cookie"] != nil;
+        NSLog(@"[AlphaSession] Response %ld for %@ (Set-Cookie: %@)",
+              (long)httpResponse.statusCode,
+              response.URL.absoluteString,
+              hasSetCookie ? @"yes" : @"no");
     }
 
     NSURLResponse *sanitized = [self sanitizedResponseForSchemeTask:schemeTask remoteResponse:response];
@@ -282,6 +445,13 @@ didCompleteWithError:(nullable NSError *)error {
 
         if (!wasActive) {
             return;
+        }
+        if (self.diagnosticLoggingEnabled) {
+            if (error != nil) {
+                NSLog(@"[AlphaSession] Failed %@: %@", task.originalRequest.URL.absoluteString, error.localizedDescription);
+            } else {
+                NSLog(@"[AlphaSession] Completed %@", task.originalRequest.URL.absoluteString);
+            }
         }
         @try {
             if (error != nil) {
