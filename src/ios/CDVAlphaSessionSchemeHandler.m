@@ -350,6 +350,16 @@ API_AVAILABLE(ios(11.0))
     // Parse any Set-Cookie header(s) generically (the session cookie name is configurable in Alpha,
     // so it is never hard-coded) and remember them.
     NSArray<NSHTTPCookie *> *responseCookies = [NSHTTPCookie cookiesWithResponseHeaderFields:headerFields forURL:url];
+
+    if (self.diagnosticLoggingEnabled && (sessionValue.length > 0 || responseCookies.count > 0)) {
+        NSString *knownName = self.sessionCookieName.length > 0 ? self.sessionCookieName : @"(none)";
+        NSLog(@"[AlphaSession] Inspecting response %@ (X-A5WSessionId: %@, Set-Cookie cookies: %lu, known name: %@)",
+              url.absoluteString,
+              sessionValue.length > 0 ? @"yes" : @"no",
+              (unsigned long)responseCookies.count,
+              knownName);
+    }
+
     BOOL sessionCookieInSetCookie = NO;
     if (responseCookies.count > 0) {
         [self rememberCookies:responseCookies];
@@ -374,9 +384,9 @@ API_AVAILABLE(ios(11.0))
         }
     }
 
-    // If this response did not carry the session cookie in Set-Cookie but we already know the cookie
-    // name, synthesise/refresh it from the always-present X-A5WSessionId value so the current session
-    // id stays available to native session-file loads.
+    // If this response did not carry the session cookie in Set-Cookie but we already learned the
+    // cookie name from a prior Set-Cookie, synthesise / refresh it from the always-present
+    // X-A5WSessionId value so the current session id stays available to native session-file loads.
     if (sessionValue.length > 0 && !sessionCookieInSetCookie) {
         [self.rememberedCookiesLock lock];
         NSString *name = self.sessionCookieName;
@@ -403,6 +413,9 @@ API_AVAILABLE(ios(11.0))
                     }
                 }
             }
+        } else if (self.diagnosticLoggingEnabled) {
+            NSLog(@"[AlphaSession] Received X-A5WSessionId on %@ but the session cookie name is not yet known (no Set-Cookie seen yet); ignoring for now.",
+                  url.absoluteString);
         }
     }
 }
