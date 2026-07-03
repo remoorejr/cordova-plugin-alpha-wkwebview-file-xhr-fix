@@ -270,6 +270,15 @@ NS_ASSUME_NONNULL_BEGIN
                            @"NativeXHRLogging" : _nativeXHRLogging,
                            @"NoS3Intercepts" : _noS3Intercepts
                           };
+
+    if (@available(iOS 11.0, *)) {
+        if ([CDVAlphaSessionSchemeHandler sharedHandler].diagnosticLoggingEnabled) {
+            // Fired once, when the XHR/fetch polyfill first initialises.  Anything the app requested
+            // BEFORE this point used native WKWebView networking and bypassed interception (race).
+            NSLog(@"[AlphaXHR] Interception polyfill initialising (getConfig) - InterceptRemoteRequests=%@.",
+                  _interceptRemoteRequests);
+        }
+    }
     
     [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:dict] callbackId:command.callbackId];
 }
@@ -320,6 +329,16 @@ NS_ASSUME_NONNULL_BEGIN
     NSString *urlStringNotEncoded = [body cdvwkStringForKey:@"url"];
     NSString *urlString = [urlStringNotEncoded stringByAddingPercentEncodingWithAllowedCharacters:NSCharacterSet.URLQueryAllowedCharacterSet];
     NSString *method = [body cdvwkStringForKey:@"method"];
+    
+    if (@available(iOS 11.0, *)) {
+        if ([CDVAlphaSessionSchemeHandler sharedHandler].diagnosticLoggingEnabled) {
+            // Logged for EVERY request that reaches the native proxy (i.e. was intercepted).  If a URL
+            // hits the server but never appears here, it bypassed interception (race or iframe).
+            NSLog(@"[AlphaXHR] Intercepted native XHR: %@ %@",
+                  method.length ? [method uppercaseString] : @"GET",
+                  urlStringNotEncoded);
+        }
+    }
     
     __weak WKWebView* weakWebView = webView;
     

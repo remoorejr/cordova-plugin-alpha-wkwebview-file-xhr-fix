@@ -60,6 +60,13 @@ API_AVAILABLE(ios(11.0))
 + (instancetype)sharedHandler;
 
 /**
+ * Whether verbose [AlphaSession]/[AlphaXHR] diagnostics are enabled (sourced from the
+ * AlphaSessionDiagnostics config.xml preference when the WKWebView configuration is built).  Exposed
+ * so the file-xhr interception can log through the same single toggle.
+ */
+@property (atomic, assign, readonly) BOOL diagnosticLoggingEnabled;
+
+/**
  * Inspects a raw XHR response's headers and captures the Alpha session cookie so subsequent
  * alpha-session requests can attach it.  This is required for cross-site / Partitioned (CHIPS) session
  * cookies (e.g. Alpha's A5WSessionId), which the XHR NSURLSession does not reliably commit to
