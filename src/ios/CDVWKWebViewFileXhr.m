@@ -128,6 +128,69 @@ NS_ASSUME_NONNULL_BEGIN
         self.urlSession = [NSURLSession sessionWithConfiguration:sessionConfiguration delegate:self delegateQueue:nil];
         [wkWebView.configuration.userContentController addScriptMessageHandler:self name:@"nativeXHR"];
 
+        // Inject the XHR/fetch interception polyfills as a document-start user script so the override is
+        // installed before ANY app request runs.  The js-modules still load later as a fallback (they
+        // self-guard against double-installation).  This eliminates the startup race where the app
+        // issues requests before the js-module override is active.
+        [self installEarlyInterceptionUserScriptInController:wkWebView.configuration.userContentController];
+
+    }
+}
+
+/**
+ * Builds and adds a WKUserScript, injected at document-start in all frames, that installs the
+ * interception polyfills before any page script runs.  The plugin configuration is injected as a
+ * global (window.__alphaXhrConfig) so the polyfill does not need cordova/exec this early.
+ */
+- (void)installEarlyInterceptionUserScriptInController:(WKUserContentController *)controller {
+    if (controller == nil) {
+        return;
+    }
+
+    BOOL diagnostics = NO;
+    if (@available(iOS 11.0, *)) {
+        diagnostics = [CDVAlphaSessionSchemeHandler sharedHandler].diagnosticLoggingEnabled;
+    }
+
+    NSMutableString *source = [NSMutableString string];
+
+    // Inject the validated (enum) config values as a global.  These come from config.xml preferences
+    // constrained to fixed keyword sets, so string interpolation here is safe.
+    [source appendFormat:@"window.__alphaXhrConfig = {\"InterceptRemoteRequests\":\"%@\",\"NativeXHRLogging\":\"%@\",\"NoS3Intercepts\":\"%@\"};\n",
+                         _interceptRemoteRequests, _nativeXHRLogging, _noS3Intercepts];
+
+    NSArray<NSString *> *scriptResources = @[ @"formdata-polyfill", @"xhr-polyfill", @"fetch-bootstrap", @"whatwg-fetch-2.0.3" ];
+    NSUInteger loaded = 0;
+    for (NSString *resourceName in scriptResources) {
+        NSString *path = [[NSBundle mainBundle] pathForResource:resourceName ofType:@"js"];
+        NSString *contents = nil;
+        if (path != nil) {
+            contents = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil];
+        }
+        if (contents.length > 0) {
+            [source appendString:contents];
+            [source appendString:@"\n"];
+            loaded++;
+        } else if (diagnostics) {
+            NSLog(@"[AlphaXHR] Early injection: could not load resource %@.js from bundle.", resourceName);
+        }
+    }
+
+    if (loaded == 0) {
+        if (diagnostics) {
+            NSLog(@"[AlphaXHR] Early injection skipped: no polyfill resources found; falling back to js-modules.");
+        }
+        return;
+    }
+
+    WKUserScript *userScript = [[WKUserScript alloc] initWithSource:source
+                                                     injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                  forMainFrameOnly:NO];
+    [controller addUserScript:userScript];
+
+    if (diagnostics) {
+        NSLog(@"[AlphaXHR] Early interception user script installed at documentStart (%lu/%lu resources).",
+              (unsigned long)loaded, (unsigned long)scriptResources.count);
     }
 }
 
