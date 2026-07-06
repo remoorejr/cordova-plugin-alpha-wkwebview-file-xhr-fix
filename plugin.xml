@@ -25,16 +25,14 @@
  *
  -->
 
-<plugin xmlns="http://apache.org/cordova/ns/plugins/1.0"
-    id="cordova-plugin-alpha-wkwebview-file-xhr-fix"
-    version="2.3.1">
+<plugin xmlns="http://apache.org/cordova/ns/plugins/1.0" id="cordova-plugin-alpha-wkwebview-file-xhr-fix" version="2.4.0">
     <name>Cordova Alpha WKWebView File XHR Plugin</name>
     <description>This plugin is designed to work with Cordova iOS 6.2.0 and Alpha Anywhere. It resolves XHR Cross-Origin Resource Sharing (CORS) constraints.</description>
-    <license>UPL 1.0</license> 
+    <license>UPL 1.0</license>
     <keywords>cordova,wkwebview</keywords>
     <repo>https://github.com/remoorejr/cordova-plugin-alpha-wkwebview-file-xhr-fix.git</repo>
     <engines>
-      <engine name="cordova-ios" version=">=6.0.0" />
+        <engine name="cordova-ios" version=">=6.0.0" />
     </engines>
 
     <!-- ios -->
@@ -63,6 +61,20 @@
 
         <header-file src="src/ios/CDVWKWebViewFileXhr.h" />
         <source-file src="src/ios/CDVWKWebViewFileXhr.m" />
+
+        <header-file src="src/ios/CDVAlphaSessionSchemeHandler.h" />
+        <source-file src="src/ios/CDVAlphaSessionSchemeHandler.m" />
+
+        <!--
+            The interception polyfills are also bundled as resources so the native side can inject them
+            as a document-start WKUserScript (before any app request runs), in addition to loading them
+            as js-modules.  This prevents a startup race where the app issues requests before the
+            js-module override is installed.
+        -->
+        <resource-file src="src/www/ios/formdata-polyfill.js" />
+        <resource-file src="src/www/ios/xhr-polyfill.js" />
+        <resource-file src="src/www/ios/fetch-bootstrap.js" />
+        <resource-file src="src/www/ios/whatwg-fetch-2.0.3.js" />
 
     </platform>
 
